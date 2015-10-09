@@ -33,6 +33,7 @@ class flat_combining {
 protected:
 
     void commit() {};
+    void begin() {};
 
 	void send_operation(mtype m, Insertable In) {
 		if (std::try_lock(op_mut) == -1) {
@@ -43,6 +44,7 @@ protected:
 			finally {
 				op_mut.unlock();
 			}
+            //work_loop
 		}
 		else {
 			message *m = get_message();
@@ -54,9 +56,14 @@ protected:
 
 private:
 
+    void work_loop() {
+
+        _commit
+    }
+
 	inline void _handle_message(mtype &&m, Insertable &&in) {
-        ((Derived *)this)->handle_message(std::forward(m->mess),
-										  std::forward(m->in));
+        ((Derived *)this)->handle_message(std::forward(m),
+										  std::forward(in));
 	}
 	//actual commit and message processing functions
     inline void _do_message(message *m) {
@@ -73,6 +80,10 @@ private:
         ((Derived *)this)->commit();
     }
 
+    inline void _begin() {
+        ((Derived *)this)->begin();
+    }
+
 	inline void set_flag(uint8_t flag,
 						 uint8_t &flg) {
 		flg |= flag;
@@ -82,6 +93,14 @@ private:
 						  uint8_t flg) {
 		return flag & flg;
 	}
+
+    //For message acquisition -
+    //maybe have a set of threadlocal
+    //message buffers from which threads can retrieve
+    //messages. Will really help to reduce contention
+    //on message creation/returning! Can also have
+    //queues split between threads, but would need
+    //static assignment to ensure ordering of messages in a
 
 	//this will always work! due to how messages work
 	//no bounds checking since a message can only be returned
@@ -115,11 +134,11 @@ private:
 														std::memory_order_relaxed,
 														std::memory_order_relaxed);
 
-					//have to allocate a new message
 					if (chead == ccache) {
-						message *rptr = malloc(sizeof(message));
-						set_flag(alloced, rptr->flags_id);
-						return rptr;
+                        //We need to prevent threads from flooding
+                        //The datastructure with too many requests
+                        //So put a bound on the possible number of requests
+						return nullptr;
 					}
 				}
 			}
@@ -134,20 +153,33 @@ private:
 
 	}
 
-	bool apply_to_messages() {
-		auto chead = qhead.load(std::memory_order_consume);
-		auto nhead = chead->next.load(std::memory_order_consume)
+    template<bool limited>
+	bool apply_to_messages(uint16_t l) {
 
-			if (nhead == nullptr) {
-				return false;
-			}
+        //the mutex should provide acquire-release semantics,
+        //so 'thread-local' variables like qhead are safe to
+        //treat as unsynchronized
 
+		auto chead = qhead.load(std::memory_order_relaxed);
+		auto nhead = chead->next.load(std::memory_order_consume);
+
+        if (nhead == nullptr) {
+            return false;
+        }
+
+        uint16_t cnum = 0;
+        _begin();
 		//in here, we assume that the message with m->next == nullptr
 		//has already been processed - we also don't take responsibility
 		//for destroying message values. This way, we process ntail
 		//and this queue works just fine!
 		do {
+
 			return_message(chead);
+            if (limited) {
+                ++cnum;
+            }
+
 			try {
 				_do_message(std::move(nhead->mess), std::move(nhead->in));
 			}
@@ -155,24 +187,29 @@ private:
 				return_message(nhead);
 				throw;
 			}
-			
+
 			chead = nhead;
+
+            if (limited && (cnum >= l)) {
+                break;
+            }
+
 		} while ((nhead = chead->next.load(std::memory_order_consume)));
 
+        _commit();
+        qhead.store(chead, std::memory_order_relaxed);
 		return true;
 	}
 
     using mtype = Derived::message_enum;
+
     typedef char buffer[128];
-    //this layout is on purpose, please forgive me...
-    struct message {
-        insertable in;
-    private:
+
+    class message {
         std::atomic<message *> next;
     public:
+        Insertable in;
         mtype mess;
-    private:
-        uint8_t flags_id;
     };
 
 	constexpr static uint8_t alloced = 1;
@@ -198,7 +235,7 @@ private:
     uint32_t qsize;
 
 	buffer _mutex;
-	
+
 	std::mutex mut;
 	std::condition_variable cond;
 
