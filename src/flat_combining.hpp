@@ -11,19 +11,16 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "message_alloc.hpp"
+
 namespace flat_combining {
-template<class Derived, class Insertable>
-class flat_combining {
+using namespace _private;
 
-	static_assert(std::is_base_of<flat_combining, Derived>::value,
+template<class Derived>
+class simple_flat_combining {
+
+	static_assert(std::is_base_of<simple_flat_combining, Derived>::value,
 				  "Derived class must inherit from flat_combining");
-
-	static_assert(std::is_nothrow_move_assignable<Insertable>::value,
-				  "Value type inserted into this container must be nothrow movable");
-
-	static_assert(std::is_nothrow_destructible<Insertable>::value,
-				  "Insertion type must not throw in the destructor");
-
 	static_assert(std::is_nothrow_move_assignable<mtype>::value,
 				  "Message type must be nothrow movable");
 
@@ -35,44 +32,46 @@ protected:
     void commit() {};
     void begin() {};
 
-	void send_operation(mtype m, Insertable In) {
+	void send_operation(mtype m, int16_t num_try=-1) {
 		if (std::try_lock(op_mut) == -1) {
 			try {
-				_handle_message(std::move(m),
-								std::move(In));
+				_handle_message(std::move(m));
 			}
 			finally {
 				op_mut.unlock();
 			}
-            //work_loop
+			if (num_try > -1) {
+				apply_to_messages<false>(-1);
+			}
+			else {
+				apply_to_messages<true>(num_try);
+			}
 		}
 		else {
 			message *m = get_message();
-			m->mess = std::move(m);
-			m->in = std::move(In);
-			send_message(m);
+			try {
+				m->mess = std::move(m);
+				send_message(m);
+			}
+			finally {
+				return_message(m);
+			}
 		}
 	}
 
 private:
 
-    void work_loop() {
-
-        _commit
-    }
-
-	inline void _handle_message(mtype &&m, Insertable &&in) {
+	inline void _handle_message(mtype &&m) {
         ((Derived *)this)->handle_message(std::forward(m),
 										  std::forward(in));
 	}
 	//actual commit and message processing functions
     inline void _do_message(message *m) {
 		try {
-			_handle_message(std::move(m->mess), std::move(m->in));
+			_handle_message(std::move(m->mess));
 		}
 		finally {
 			m->mess.~mtype();
-			m->in.~Insertable();
 		}
     }
 
@@ -94,71 +93,66 @@ private:
 		return flag & flg;
 	}
 
-    //For message acquisition -
-    //maybe have a set of threadlocal
-    //message buffers from which threads can retrieve
-    //messages. Will really help to reduce contention
-    //on message creation/returning! Can also have
-    //queues split between threads, but would need
-    //static assignment to ensure ordering of messages in a
-
-	//this will always work! due to how messages work
-	//no bounds checking since a message can only be returned
-	//after removing it from the queue
 	void return_message(message *m) {
 
-		if (test_flag(m->flags_id)) {
-			free(m);
-			return;
-		}
-
-		auto ctail = ntail.load(std::memory_order_relaxed);
-		auto cind = ctail & (qsize - 1);
-		queue_ptr[cind] = m;
-		ntail.store((cind + 1) & (qsize - 1), std::memory_order_release);
-	}
-
-	message *get_message() {
-		auto chead = nhead.load(std::memory_order_relaxed);
-		auto ccache = ntail_cache.load(std::memory_order_relaxed);
-		do {
-			if (chead == ccache) {
-				//reload in case other thread got it
-				ccache = ntail_cache.load(std::memory_order_relaxed);
-
-				if (chead == ccache) {
-
-					auto ctail = ntail.load(std::memory_order_acquire);
-					ntail_cache.compare_exchange_strong(ccache,
-														ctail,
-														std::memory_order_relaxed,
-														std::memory_order_relaxed);
-
-					if (chead == ccache) {
-                        //We need to prevent threads from flooding
-                        //The datastructure with too many requests
-                        //So put a bound on the possible number of requests
-						return nullptr;
-					}
-				}
+		if (m->fromwhich) {
+			if (m->fromwhich & is_mp) {
+				mpal_type *from = (mpal_type *)(m->fromwhich & (~is_mp));
+				from->return_message(m);
+			}
+			else {
+				spal_type *from = (spal_type *)m->fromwhich;
+				from->return_message(m);
 			}
 		}
+		else {
+			free(m);
+		}
+	}
+
+	template<bool use_mp>
+	message *get_message() {
+		message *retm;
+		uintptr_t calloc;
+
+		if (use_mp) {
+			auto _calloc = MPAlloc<message>::current_alloc();
+			retm = calloc->get_message();
+			calloc = (uintptr_t)_calloc;
+			calloc |= is_mp;
+		}
+		else {
+			auto _calloc = SPAlloc<message>::current_alloc();
+			retm = calloc->get_message();
+			calloc = (uintptr_t)_calloc;
+		}
+
+
+		if (retm) {
+			retm->from_which = calloc;
+		}
+		else {
+			retm = malloc(sizeof(*retm));
+			retm->fromwhich = 0;
+		}
+
+		return retm;
 	}
 
 	void send_message(message *m) {
 
 		m->next.store(nullptr, std::memory_order_relaxed);
-		auto oldtail = qtail.exchange(m, std::memory_order_acq_rel);
-		oldtail->next.store(m, std::memory_order_relaxed);
 
+		//release to synchronize with other producer
+		//acquire to synchronize with oldtail->next write
+		auto oldtail = qtail.exchange(m, std::memory_order_acq_rel);
+
+		//release to synchronize with consumer
+		oldtail->next.store(m, std::memory_order_release);
 	}
 
     template<bool limited>
-	bool apply_to_messages(uint16_t l) {
-
-        //the mutex should provide acquire-release semantics,
-        //so 'thread-local' variables like qhead are safe to
-        //treat as unsynchronized
+	bool apply_to_messages(int16_t l) {
 
 		auto chead = qhead.load(std::memory_order_relaxed);
 		auto nhead = chead->next.load(std::memory_order_consume);
@@ -181,10 +175,11 @@ private:
             }
 
 			try {
-				_do_message(std::move(nhead->mess), std::move(nhead->in));
+				_do_message(std::move(nhead->mess));
 			}
 			catch (...) {
-				return_message(nhead);
+				//move on with the messages
+				qhead.store(nhead, std::memory_order_relaxed);
 				throw;
 			}
 
@@ -202,17 +197,18 @@ private:
 	}
 
     using mtype = Derived::message_enum;
+	using mpal_type = MPAlloc<message>::alloc_type;
+	using spal_type = SPAlloc<message>::alloc_type;
 
     typedef char buffer[128];
 
-    class message {
+    struct message {
         std::atomic<message *> next;
-    public:
-        Insertable in;
+		uintptr_t fromwhich;
         mtype mess;
     };
 
-	constexpr static uint8_t alloced = 1;
+	constexpr static uintptr_t is_mp = 1;
 
     buffer _backb;
     //head of message queue
@@ -220,19 +216,6 @@ private:
 
     buffer _qtail;
     std::atomic<message *> qtail;
-
-    buffer _nhead;
-    std::atomic<uint32_t> nhead;
-    std::atomic<uint32_t> ntail_cache;
-
-    buffer _ntail;
-    std::atomic<uint32_t> ntail;
-
-    buffer _shared;
-
-    message *message_holder;
-    message **queue_ptr;
-    uint32_t qsize;
 
 	buffer _mutex;
 
