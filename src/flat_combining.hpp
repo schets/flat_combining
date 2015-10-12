@@ -58,31 +58,38 @@ protected:
 			m->mess = std::move(m);
 			m->n = &mynot;
 			send_message(m);
-			try {
-				//really shouldn't be hit...
-				try_again:
-				{
-					std::unique_lock<std::mutex> lk(mynot.cond.mut);
-					mynot.cond.wait(lk, [&mynot]() {
-						return mynot.reason != not_reason.empty;
-					});
-				}
 
-				switch (mynot.reason) {
-				case not_reason.empty:
-					goto try_again;
-				case not_reason.finished:
-					if (m->exc_ptr != nullptr) {
-						std::rethrow_exception(m->exc_ptr);
-					}
-					break;
-				case not_reason.takeover:
+            //this ensures that m is always returned!
+            struct always_ret_m {
+                message *_m;
+                always_ret_m(message * mm) : _m(mm) {}
+                ~always_ret_m() {return_message(_m);}
+            } always_ret (m);
+
+				//really shouldn't be hit...
+            try_again:
+            {
+               std::unique_lock<std::mutex> lk(mynot.cond.mut);
+               mynot.cond.wait(lk, [&mynot]() {
+                  return mynot.reason != not_reason.empty;
+              });
+           }
+
+           switch (mynot.reason) {
+
+            case not_reason.empty:
+            goto try_again;
+
+            case not_reason.finished:
+            if (m->exc_ptr != nullptr) {
+              std::rethrow_exception(m->exc_ptr);
+          }
+          break;
+
+          case not_reason.takeover:
 					//handle here somehow...
-				}
-			}
-			finally {
-				return_message(m);
-			}
+
+      }
 		}
 	}
 
@@ -100,10 +107,8 @@ private:
 		catch (...) {
 			m->exc_ptr = std::current_exception();
 		}
-		finally {
-			signal_message(m, not_reason.finished);
-			m->mess.~mtype();
-		}
+         signal_message(m, not_reason.finished);
+         m->mess.~mtype();
     }
 
     inline void _commit() {
@@ -138,44 +143,27 @@ private:
 		//delegate to the proper message handler
 		//multi-producer, single-producer, completely local
 		if (m->fromwhich) {
-			if (m->fromwhich & is_mp) {
-				mpal_type *from = (mpal_type *)(m->fromwhich & (~is_mp));
-				from->return_message(m);
-			}
-			else {
-				spal_type *from = (spal_type *)m->fromwhich;
-				from->return_message(m);
-			}
+            m->fromwhich->return_message(m);
 		}
 		else {
 			free(m);
 		}
 	}
 
-	template<bool use_mp>
+    //allocates a message for
+    //use by an asynchronous request
 	message *get_message() {
 		message *retm;
-		uintptr_t calloc;
 
-		if (use_mp) {
-			auto _calloc = MPAlloc<message>::current_alloc();
-			retm = calloc->get_message();
-			calloc = (uintptr_t)_calloc;
-			calloc |= is_mp;
-		}
-		else {
-			auto _calloc = SPAlloc<message>::current_alloc();
-			retm = calloc->get_message();
-			calloc = (uintptr_t)_calloc;
-		}
-
+         auto calloc = MPAlloc<message>::current_alloc();
+         retm = calloc->get_message();
 
 		if (retm) {
 			retm->from_which = calloc;
 		}
 		else {
 			retm = malloc(sizeof(*retm));
-			retm->fromwhich = 0;
+			retm->fromwhich = nullptr;
 		}
 
 		return retm;
@@ -260,7 +248,7 @@ private:
     struct message {
         std::atomic<message *> next;
 		notification *n;
-		uintptr_t fromwhich;
+		mpal_type *fromwhich;
         mtype mess;
     };
 
