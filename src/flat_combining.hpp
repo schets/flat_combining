@@ -6,6 +6,7 @@
 #include <condition_variable>
 
 #include <type_traits>
+#include <stdexcept>
 #include <utility>
 
 #include <stdint.h>
@@ -21,6 +22,7 @@ class simple_flat_combining {
 
 	static_assert(std::is_base_of<simple_flat_combining, Derived>::value,
 				  "Derived class must inherit from flat_combining");
+
 	static_assert(std::is_nothrow_move_assignable<mtype>::value,
 				  "Message type must be nothrow movable");
 
@@ -48,10 +50,35 @@ protected:
 			}
 		}
 		else {
+			notification mynot;
+			mynot->exc_ptr = nullptr;
+			mynot->not_reason = not_reason.empty;
 			message *m = get_message();
+			m->mess = std::move(m);
+			m->n = &mynot;
+			send_message(m);
 			try {
-				m->mess = std::move(m);
-				send_message(m);
+				//really shouldn't be hit...
+				try_again:
+				{
+					std::unique_lock<std::mutex> lk(mynot.mut);
+					mynot.cond.wait(lk, [&mynot]() {
+						return mynot.reason != not_reason.empty;
+					});
+				}
+
+				//deal with it...
+				switch (mynot.reason) {
+				case not_reason.empty:
+					goto try_again;
+				case not_reason.finished:
+					if (m->exc_ptr != nullptr) {
+						std::rethrow_exception(m->exc_ptr);
+					}
+					break;
+				case not_reason.takeover:
+					//handle here somehow...
+				}
 			}
 			finally {
 				return_message(m);
@@ -62,15 +89,19 @@ protected:
 private:
 
 	inline void _handle_message(mtype &&m) {
-        ((Derived *)this)->handle_message(std::forward(m),
-										  std::forward(in));
+        ((Derived *)this)->handle_message(std::forward(m));
+
 	}
 	//actual commit and message processing functions
     inline void _do_message(message *m) {
 		try {
 			_handle_message(std::move(m->mess));
 		}
+		catch (...) {
+			m->exc_ptr = std::current_exception();
+		}
 		finally {
+			signal_message(m, not_reason.finished);
 			m->mess.~mtype();
 		}
     }
@@ -93,8 +124,19 @@ private:
 		return flag & flg;
 	}
 
+	void signal_message(message *m, not_reason reason) {
+		if (!m->n) {
+			return;
+		}
+		m->n->not_reason = reason;
+		std::lock_guard(m->n->mut);
+		m->n->cond.notify_one();
+	};
+
 	void return_message(message *m) {
 
+		//delegate to the proper message handler
+		//multi-producer, single-producer, completely local
 		if (m->fromwhich) {
 			if (m->fromwhich & is_mp) {
 				mpal_type *from = (mpal_type *)(m->fromwhich & (~is_mp));
@@ -179,7 +221,7 @@ private:
 			}
 			catch (...) {
 				//move on with the messages
-				qhead.store(nhead, std::memory_order_relaxed);
+				qhead.store(nhead, std::memory_order_relaxed);		   ko
 				throw;
 			}
 
@@ -196,15 +238,31 @@ private:
 		return true;
 	}
 
+private:
+
     using mtype = Derived::message_enum;
 	using mpal_type = MPAlloc<message>::alloc_type;
 	using spal_type = SPAlloc<message>::alloc_type;
 
     typedef char buffer[128];
 
+	enum class not_reason {
+		empty=0,
+		finished,
+		take_over,
+	};
+
+	struct notification {
+		std::mutex mut;
+		std::condition_variable cond;
+		not_reason reason;
+	};
+
     struct message {
         std::atomic<message *> next;
+		notification *n;
 		uintptr_t fromwhich;
+		std::exception_ptr exc_ptr;
         mtype mess;
     };
 
@@ -225,8 +283,11 @@ private:
 	buffer _mutex2;
 	std::mutex op_mut;
 
-    buffer _bottom;
+	buffer _waiting;
 
+	std::atomic<char> waiting;
+
+    buffer _bottom;
 };
 
 } //namespace flat_combining
