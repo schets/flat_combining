@@ -2,10 +2,30 @@
 #include "flat_combining.hpp"
 #include <deque>
 #include <utility>
+#include <mutex>
 
+template<bool dolock = false>
 class flat_queue {
+	struct lwmut {
+		std::atomic<uint64_t> mut;
+		void get () {
+			for(;;) {
+				uint64_t dummy = 0;
+				while (mut.load(std::memory_order_relaxed)) {}
+				if (mut.compare_exchange_weak(dummy,
+											  1,
+											  std::memory_order_acquire,
+											  std::memory_order_relaxed)) {
+					return;
+				}
+			}
+		}
+		void release() {
+			mut.store(0, std::memory_order_release);
+		}
+	};
 	std::deque<int> value;
-
+	lwmut mut;
 public:
 	enum class m_type {
 		insert,
@@ -51,6 +71,12 @@ public:
 	}
 
 	void as_push(int i) {
+		if (dolock) {
+			mut.get();
+			value.push_back(i);
+			mut.release();
+			return;
+		}
 		message_type m;
 		m.data.add = i;
 		m.mess = m_type::insert;
@@ -58,6 +84,17 @@ public:
 	}
 
 	bool as_pop(int &i) {
+		if (dolock) {
+			mut.get();
+			if (value.empty()) {
+				mut.release();
+				return false;
+			}
+			i = value.front();
+			value.pop_front();
+			mut.release();
+			return true;
+		}
 		rmtype rm;
 		message_type m;
 		m.data.remove = &rm;

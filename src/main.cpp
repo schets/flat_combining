@@ -5,14 +5,14 @@
 #include <mutex>
 #include <random>
 using namespace std;
-flat_queue test;
+flat_queue<false> test;
 
 bool go = false;
 std::mutex mut;
 std::condition_variable cond;
 
-constexpr static size_t nthread = 4;
-constexpr static size_t npush = 100000000 / nthread;
+constexpr static size_t nthread = 8;
+constexpr static size_t npush = 100000 / nthread;
 int stopval = npush + 1;
 std::thread threads[nthread];
 
