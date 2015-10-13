@@ -50,6 +50,7 @@ class simple_flat_combining {
 			return false;
 		}
 
+
 		void release() {
 			mut.store(0, std::memory_order_release);
 		}
@@ -295,7 +296,9 @@ private:
 		if (inhere != 0) {
 			cout << "many threads " << inhere;
 		}
-		auto ctail = qtail.exchange(nullptr, std::memory_order_consume);
+
+		//make work with older gccs
+		auto ctail = qtail.exchange(nullptr, std::memory_order_acquire);
 
 		if (ctail == nullptr) {
 			current.fetch_sub(1);
@@ -311,7 +314,8 @@ private:
 					cout << "Bad ptr somehow!" << endl;
 				}
 			}
-			ctail = ctail->next.load(std::memory_order_consume);
+
+			ctail = ctail->next.load(std::memory_order_acquire);
 
 			if (limited) {
 				++cnum;
@@ -330,7 +334,8 @@ private:
 
 			if (ctail == nullptr) {
 				if (qtail.load(std::memory_order_relaxed) != nullptr) {
-					ctail = qtail.exchange(nullptr, std::memory_order_consume);
+					//should make work with older gccs
+					ctail = qtail.exchange(nullptr, std::memory_order_acquire);
 				}
 				else {
 					break;
