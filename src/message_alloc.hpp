@@ -9,6 +9,8 @@
 namespace flat_combining {
 namespace _private {
 
+
+/*
 //TODO - moar smart ptrs
 
 //spsc queue for thread-local message sending/stuffs
@@ -92,10 +94,23 @@ public:
 	}
 
 };
-
+		*/
 template<size_t ssize>
 class message_alloc {
 
+	struct message {
+		union {
+			void *for_alignment;
+			char buff[ssize];
+		} data;
+		std::atomic<message *> next;
+	};
+
+	message *head;
+
+	char headbuf[64];
+
+	std::atomic<message *> tail;
 	//holds 128 active messages for the thread
 	//this prevents a single thread from
 	//bloating too much memory,
@@ -153,19 +168,6 @@ public:
 
 private:
 
-	struct message {
-		union {
-			void *for_alignment;
-			char buff[ssize];
-		} data;
-		std::atomic<message *> next;
-	};
-
-	std::atomic<message *> head;
-
-	char headbuf[64];
-
-	message *tail;
 };
 
 template<class m_alloc>
@@ -203,7 +205,7 @@ class MessageHolder {
 		return rval;
 	}
 
-	message_alloc<ssize> *_get_alloc() {
+	m_alloc *_get_alloc() {
 		std::lock_guard<std::mutex> lg(lock);
 		if (stealable.empty()) {
 			return add_alloc();
@@ -245,11 +247,11 @@ public:
 
 template<class T>
 class round64 {
+	static constexpr size_t cache_size = 64;
 	static constexpr size_t calc_size() {
-		static constexpr size_t cache_size = 64;
-		return (cache_size - (sizeof(T) % cache_size)) % cache_size;
+		return sizeof(T) + ((cache_size - (sizeof(T) % cache_size)) % cache_size);
 	}
-pubic:
+public:
 	static constexpr size_t size = calc_size();
 };
 
@@ -267,18 +269,25 @@ public:
 	}
 };
 
+
+template<size_t ts, size_t ss>
+class asserter {
+	//should NEVER throw
+	static_assert(ts <= ss,
+				  "Message allocators must have an equal to or greater than size");
+};
+
 template<class T, template<size_t> class m_alloc>
 class CurAlloc {
 	constexpr static size_t ssize = round64<T>::size;
-	//should NEVER throw
-	static_assert(sizeof(T) <= ssize,
-				  "Message allocators must have an equal to or greater than size");
 
-	static thread_local m_alloc<ssize> *al = nullptr;
+	asserter<sizeof(T), ssize> test;
+
+	static thread_local m_alloc<ssize> *al;
 
 public:
 
-	using alloc_type = message_queue<T, decltype(*al)>;
+	using alloc_type = message_queue<T, m_alloc<ssize>>;
 	inline static alloc_type *current_alloc(size_t mid) {
 		if (al == nullptr) {
 			al = MessageHolder<alloc_type>::get_alloc(mid);
@@ -287,13 +296,16 @@ public:
 	}
 };
 
+template<class T, template<size_t> class m_alloc>
+m_alloc<CurAlloc<T, m_alloc>::ssize> *CurAlloc<T, m_alloc>::al = nullptr;
+
 //used by the flat combiner
 template<class T>
-using MPAlloc = CurAlloc<T, mp_message_alloc>;
+using MPAlloc = CurAlloc<T, message_alloc>;
 
 //used by the transaction class
-template<class T>
-using SPAlloc = CurAlloc<T, sp_message_alloc>;
+//template<class T>
+//using SPAlloc = CurAlloc<T, sp_message_alloc>;
 
 } //namespace _private
 } //namespace flat_combining
