@@ -2,10 +2,10 @@
 #define FLAT_COMBINING_HPP_
 
 #include <atomic>
-#include <mutex>
-#include <condition_variable>
+#include <thread>
 
 #include <iostream>
+using namespace std;
 
 #include <type_traits>
 #include <stdexcept>
@@ -18,15 +18,9 @@
 
 namespace flat_combining {
 
-namespace _private {
-struct cond_var {
-	std::condition_variable cond;
-	std::mutex mut;
-};
-thread_local cond_var ccond;
-
-}
 using namespace _private;
+
+int *mtest;
 
 template<class T>
 class combining_defaults {
@@ -43,34 +37,43 @@ class simple_flat_combining {
 
 	typedef char buffer[128];
 
+	struct lw_mut {
+		std::atomic<size_t> mut;
+		bool try_acquire() {
+			size_t dummy = 0;
+			if (!mut.load(std::memory_order_relaxed)) {
+				return mut.compare_exchange_weak(dummy,
+											  1,
+											  std::memory_order_acquire,
+											  std::memory_order_relaxed);
+			}
+		}
+
+		void release() {
+			mut.store(0, std::memory_order_release);
+		}
+	};
+
 	enum class not_reason {
 		empty = 0,
 		finished,
 		take_over,
 	};
 
-	struct notification {
-		cond_var &cond;
-		std::exception_ptr exc_ptr;
-		not_reason reason;
-		notification() :
-			cond(ccond),
-			exc_ptr(nullptr),
-			reason(not_reason::empty) {}
-	};
-
 	struct message {
 		std::atomic<message *> next;
 		void *fromwhich;
-		mtype mess;
-		notification* n;
+		std::exception_ptr exc_ptr;
+		not_reason reason;
 		uint8_t flags;
-		message(mtype &m,
-				notification *_n) :
+		mtype mess;
+		message(mtype &m) :
 			next(0),
-			n(_n),
 			mess(std::move(m)),
-			flags(0) {}
+			exc_ptr(nullptr),
+			reason(not_reason::empty),
+			flags(0)
+			{}
 
 	};
 
@@ -85,19 +88,16 @@ class simple_flat_combining {
     buffer _backb;
     std::atomic<message *> qtail;
 
-	buffer _mutex;
-
-	std::mutex mut;
-	std::condition_variable cond;
-
 	buffer _mutex2;
-	std::mutex op_mut;
+	lw_mut op_mut;
 
 	buffer _waiting;
 
 	std::atomic<char> waiting;
 
     buffer _bottom;
+
+    std::atomic<size_t> current;
 
 public:
 
@@ -106,10 +106,9 @@ public:
 
 protected:
 
-	bool try_to_message(std::unique_lock<std::mutex>& lck,
-						mtype &m,
+	bool try_to_message(mtype &m,
 						uint16_t num_try) {
-		if (lck.try_lock()) {
+		if (op_mut.try_acquire()) {
 			cur->handle_message(std::move(m));
 			if (num_try > -1) {
 				apply_to_messages<false>(-1);
@@ -117,6 +116,7 @@ protected:
 			else {
 				apply_to_messages<true>(num_try);
 			}
+			op_mut.release();
 			return true;
 		}
 		return false;
@@ -126,36 +126,54 @@ public:
 
 	simple_flat_combining() :
 		qtail(nullptr),
-		waiting(0) {}
+		waiting(0),
+		current(0) {
+			op_mut.release();
+			mtest = (int *)0xffffffff;
+		}
 
 	void send_operation(mtype m, int16_t num_try = -1) {
-		std::unique_lock<std::mutex> lck(op_mut, std::defer_lock);
-		if (!try_to_message(lck, m, num_try)) {
-			notification not;
-			message setm(m, &not);
+		if (!try_to_message(m, num_try)) {
+			size_t n_micros = 0;
+			message setm(m);
 			set_flag(is_stack, setm.flags);
 			send_message(&setm);
 			//really shouldn't be hit...
 		try_again:
 			{
-				std::unique_lock<std::mutex> lk(not.cond.mut);
-				not.cond.cond.wait_for(lk, std::chrono::microseconds(10));
+				if (n_micros == 0) {
+					//spin
+					for (volatile size_t i = 0; i < 10; i++) {}
+					n_micros = 2;
+				}
+				else {
+					std::this_thread::sleep_for(std::chrono::microseconds(n_micros));
+					n_micros *= 1.3;
+					n_micros = std::min(n_micros, (size_t)10);
+				}
 			}
 
-			switch (not.reason) {
+			switch (setm.reason) {
 
 			case not_reason::finished:
-				if (not.exc_ptr != nullptr) {
-					std::rethrow_exception(not.exc_ptr);
+				std::atomic_thread_fence(std::memory_order_acquire);
+				if (setm.exc_ptr != nullptr) {
+					std::rethrow_exception(setm.exc_ptr);
 				}
 				break;
 
 			case not_reason::empty:
 			case not_reason::take_over:
-				if (!try_to_message(lck, setm.mess, num_try)) {
+				if (!try_to_message(setm.mess, num_try)) {
 					goto try_again;
 				}
 			}
+		}
+	}
+
+	void send_operation_async(mtype m, int16_t num_try = -1) {
+		if (!try_to_message(m, num_try)) {
+			send_message(get_message(m));
 		}
 	}
 
@@ -163,17 +181,14 @@ private:
 
 	template<bool check = false>
 	inline void _handle_message(message &m) {
-		if (m.n) {
-			if (check && m.n->reason == not_reason::finished) {
-				return;
-			}
+		if (check && m.reason == not_reason::finished) {
+			return;
 		}
-		m.n->reason = not_reason::finished;
-		if (m.n->reason != not_reason::finished) {
-			cout << "WFTMATE;ASDASDLKJASD\n";
-		}
+
 		cur->handle_message(std::move(m.mess));
-		if (m.n->reason != not_reason::finished) {
+		std::atomic_thread_fence(std::memory_order_release);
+		m.reason = not_reason::finished;
+		if (m.reason != not_reason::finished) {
 			cout << "WFTMATE\n";
 		}
 	}
@@ -183,14 +198,12 @@ private:
 			_handle_message(m);
 		}
 		catch (...) {
-			if (m.n) {
-				m.n->exc_ptr = std::current_exception();
-			}
+			std::atomic_thread_fence(std::memory_order_release);
+			m.exc_ptr = std::current_exception();
 		}
-		if (m.n->reason != not_reason::finished) {
+		if (m.reason != not_reason::finished) {
 			std::cout << "BAD BUG" << std::endl;
 		}
-		signal_message(m);
 	}
 
 	inline void _commit() {
@@ -211,14 +224,6 @@ private:
 		return flag & flg;
 	}
 
-	void signal_message(message &m) {
-		if (!m.n) {
-			return;
-		}
-		std::unique_lock<std::mutex> lck(m.n->cond.mut);
-		m.n->cond.cond.notify_one();
-	};
-
 	void return_message(message *m) {
 
 		//delegate to the proper message handler
@@ -230,7 +235,6 @@ private:
 			break;
 		case is_malloc:
 			free(m);
-			break;
 		case is_stack:
 		default:
 			break;
@@ -239,18 +243,20 @@ private:
 
 	//allocates a message for
 	//use by an asynchronous request
-	message *get_message() {
+	message *get_message(mtype &m) {
 		message *retm;
 
 		auto calloc = MPAlloc<message>::current_alloc();
-		retm = calloc->get_message();
+		retm = (message *)calloc->get_message();
 
 		if (retm) {
+			new (retm) message(m);
 			retm->fromwhich = calloc;
 			set_flag(is_mp, retm->flags);
 		}
 		else {
-			retm = malloc(sizeof(*retm));
+			retm = (message *)malloc(sizeof(*retm));
+			new (retm) message(m);
 			retm->fromwhich = nullptr;
 			set_flag(is_malloc, retm->flags);
 		}
@@ -259,7 +265,12 @@ private:
 	}
 
 	void send_message(message *m) {
-
+		if (test_flag(is_mp, m->flags)) {
+			if (m->fromwhich == nullptr) {
+				cout << "Bad ptr somehow! in send first" << endl;
+				cout << *mtest;
+			}
+		}
 		auto ctail = qtail.load(std::memory_order_relaxed);
 		do {
 			m->next.store(ctail, std::memory_order_relaxed);
@@ -267,14 +278,26 @@ private:
 											  m,
 											  std::memory_order_release,
 											  std::memory_order_relaxed));
+		if (test_flag(is_mp, m->flags)) {
+			if (m->fromwhich == nullptr) {
+				cout << "Bad ptr somehow! in send second" << endl;
+				cout << *mtest;
+			}
+		}
 	}
 
 	template<bool limited>
 	bool apply_to_messages(int16_t l) {
 
+		auto inhere = current.fetch_add(1);
+
+		if (inhere != 0) {
+			cout << "many threads " << inhere;
+		}
 		auto ctail = qtail.exchange(nullptr, std::memory_order_consume);
 
 		if (ctail == nullptr) {
+			current.fetch_sub(1);
 			return false;
 		}
 
@@ -282,6 +305,11 @@ private:
 		_begin();
 		for (;;) {
 			auto cur_m = ctail;
+			if (test_flag(is_mp, cur_m->flags)) {
+				if (cur_m->fromwhich == nullptr) {
+					cout << "Bad ptr somehow!" << endl;
+				}
+			}
 			ctail = ctail->next.load(std::memory_order_consume);
 
 			if (limited) {
@@ -289,7 +317,9 @@ private:
 			}
 
 			//this wpn't throw! exceptions are stored in the notification
-			_do_message(*cur_m);
+			if (cur_m->reason == not_reason::empty) {
+				_do_message(*cur_m);
+			}
 
 			return_message(cur_m);
 
@@ -308,6 +338,7 @@ private:
 		};
 
 		_commit();
+		current.fetch_sub(1);
 		return true;
 	}
 };

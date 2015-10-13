@@ -54,7 +54,7 @@ public:
 		message_type m;
 		m.data.add = i;
 		m.mess = m_type::insert;
-		combiner.send_operation(m);
+		combiner.send_operation_async(m);
 	}
 
 	bool as_pop(int &i) {

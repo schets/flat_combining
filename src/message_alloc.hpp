@@ -117,29 +117,31 @@ class message_alloc {
 	//sending too many messages if the combiner doesn't alloc more
 	static constexpr size_t num_hold = 128;
 	message_alloc() {
-		tail = malloc(sizeof(message));
-		head.store(tail, std::memory_order_relaxed);
-		for (size_t i = 0, i < num_hold ; i++) {
-			auto chead = head.load(std::memory_order_relaxed);
-			chead->next.store(malloc(sizeof(message)), std::memory_order_relaxed);
-			head.store(chead, std::memory_order_relaxed);
+		head = (message *)malloc(sizeof(message));
+		tail.store(head, std::memory_order_relaxed);
+		message * mtail = head;
+		for (size_t i = 0; i < num_hold ; i++) {
+			message *nptr = (message *)malloc(sizeof(message));
+			mtail->next.store(nptr, std::memory_order_relaxed);
+			mtail = nptr;
 		}
-		auto chead = head.load(std::memory_order_relaxed);
-		chead->next.store(nullptr);
+		mtail->next.store(nullptr);
+		tail.store(mtail, std::memory_order_relaxed);
 		std::atomic_thread_fence(std::memory_order_release);
 	};
 
 	//not thread safe
 	~message_alloc() {
 		std::atomic_thread_fence(std::memory_order_acquire);
-		while (tail) {
-			auto ntail = tail->next.load(std::memory_order_relaxed);
-			free(tail);
-			tail = ntail;
+		while (head) {
+			auto nhead = head->next.load(std::memory_order_relaxed);
+			free(head);
+			head = nhead;
 		}
 	}
 
 public:
+	size_t rind;
 
 	static message_alloc *create() {
 		return new message_alloc();
@@ -152,18 +154,22 @@ public:
 	void return_message(void *_m) {
 		message *m = (message *)_m;
 		m->next.store(nullptr, std::memory_order_relaxed);
-		auto oldhead = tail.exchange(m, std::memory_order_acq_rel);
-		oldhead->next.store(tail, std::memory_order_release);
+		auto oldtail = tail.exchange(m, std::memory_order_acq_rel);
+		oldtail->next.store(tail, std::memory_order_release);
 	}
 
 	void *get_message() {
-		auto cnext = tail->next.load(std::memory_order_consume);
+		auto cnext = head->next.load(std::memory_order_consume);
 		if (cnext != nullptr) {
-			void *rval = tail->data.buff;
-			tail = cnext;
+			void *rval = head->data.buff;
+			head = cnext;
 			return rval;
 		}
 		return nullptr;
+	}
+
+	bool empty() {
+		return head->next.load(std::memory_order_relaxed);
 	}
 
 private:
@@ -211,8 +217,8 @@ class MessageHolder {
 			return add_alloc();
 		}
 		else {
-			for (size_t i = 0; i < stealable.size() - 1, i++) {
-				if (!stealable[i].empty()) {
+			for (size_t i = 0; i < stealable.size() - 1; i++) {
+				if (!stealable[i]->empty()) {
 					auto rval = stealable[i];
 					stealable[i] = stealable.back();
 					stealable.pop_back();
@@ -220,7 +226,7 @@ class MessageHolder {
 				}
 			}
 			auto rv = stealable.back();
-			if (rv.empty()) {
+			if (rv->empty()) {
 				return add_alloc();
 			}
 			stealable.pop_back();
@@ -245,6 +251,9 @@ public:
 	}
 };
 
+template<class alloc>
+MessageHolder<alloc> MessageHolder<alloc>::holds_allocs;
+
 template<class T>
 class round64 {
 	static constexpr size_t cache_size = 64;
@@ -253,20 +262,6 @@ class round64 {
 	}
 public:
 	static constexpr size_t size = calc_size();
-};
-
-template<class T, class m_alloc>
-class message_queue {
-	m_alloc *mall;
-
-public:
-	T *get_message() {
-		return (T *)mall->get_message();
-	}
-
-	void return_message(T *message) {
-		mall->return_message(message);
-	}
 };
 
 
@@ -287,17 +282,17 @@ class CurAlloc {
 
 public:
 
-	using alloc_type = message_queue<T, m_alloc<ssize>>;
-	inline static alloc_type *current_alloc(size_t mid) {
+	using alloc_type = m_alloc<ssize>;
+	inline static alloc_type *current_alloc() {
 		if (al == nullptr) {
-			al = MessageHolder<alloc_type>::get_alloc(mid);
+			al = MessageHolder<alloc_type>::get_alloc();
 		}
 		return al;
 	}
 };
 
 template<class T, template<size_t> class m_alloc>
-m_alloc<CurAlloc<T, m_alloc>::ssize> *CurAlloc<T, m_alloc>::al = nullptr;
+thread_local m_alloc<CurAlloc<T, m_alloc>::ssize> *CurAlloc<T, m_alloc>::al = nullptr;
 
 //used by the flat combiner
 template<class T>
