@@ -70,6 +70,10 @@ public:
 		combiner.cur = this;
 	}
 
+	~flat_queue() {
+		cout << "killing!";
+	}
+
 	void as_push(int i) {
 		if (dolock) {
 			mut.get();

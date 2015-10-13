@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
 		});
 		cur++;
 	}
-	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	std::this_thread::sleep_for(std::chrono::milliseconds(5));
 	auto runst = std::thread(popt);
 	auto ctime = clock();
 	go = true;
@@ -81,6 +81,5 @@ int main(int argc, char **argv) {
 	cout << "Took " << (ctime * 1.0) / CLOCKS_PER_SEC
 		 << " seconds for " << nthread << " threads and "
 		 << npush << " elements per thread" << endl;
-	cin >> i;
 	return 0;
 }

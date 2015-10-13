@@ -47,6 +47,7 @@ class simple_flat_combining {
 											  std::memory_order_acquire,
 											  std::memory_order_relaxed);
 			}
+			return false;
 		}
 
 		void release() {
