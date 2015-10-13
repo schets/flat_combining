@@ -54,7 +54,7 @@ public:
 		message_type m;
 		m.data.add = i;
 		m.mess = m_type::insert;
-		combiner.send_operation(std::move(m));
+		combiner.send_operation(m);
 	}
 
 	bool as_pop(int &i) {
@@ -62,7 +62,7 @@ public:
 		message_type m;
 		m.data.remove = &rm;
 		m.mess = m_type::remove;
-		combiner.send_operation(std::move(m));
+		combiner.send_operation(m);
 		if (rm.suc) {
 			i = rm.val;
 			return true;

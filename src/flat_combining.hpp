@@ -5,6 +5,8 @@
 #include <mutex>
 #include <condition_variable>
 
+#include <iostream>
+
 #include <type_traits>
 #include <stdexcept>
 #include <utility>
@@ -74,9 +76,9 @@ class simple_flat_combining {
 
 	using mpal_type = typename MPAlloc<message>::alloc_type;
 
-	constexpr static uint8_t is_mp = 1;
-	constexpr static uint8_t is_stack = 1 << 1;
-	constexpr static uint8_t is_malloc = 1 << 2;
+	constexpr static uint8_t is_mp = 1 << 1;
+	constexpr static uint8_t is_stack = 1 << 2;
+	constexpr static uint8_t is_malloc = 1 << 3;
 	constexpr static uint8_t alloc_mask = is_mp | is_stack | is_malloc;
 
 	struct message;
@@ -137,15 +139,10 @@ public:
 		try_again:
 			{
 				std::unique_lock<std::mutex> lk(not.cond.mut);
-				not.cond.cond.wait(lk, [&not]() {
-					return not.reason != not_reason::empty;
-				});
+				not.cond.cond.wait_for(lk, std::chrono::microseconds(10));
 			}
 
 			switch (not.reason) {
-
-			case not_reason::empty:
-				goto try_again;
 
 			case not_reason::finished:
 				if (not.exc_ptr != nullptr) {
@@ -153,6 +150,7 @@ public:
 				}
 				break;
 
+			case not_reason::empty:
 			case not_reason::take_over:
 				if (!try_to_message(lck, setm.mess, num_try)) {
 					goto try_again;
@@ -169,9 +167,15 @@ private:
 			if (check && m.n->reason == not_reason::finished) {
 				return;
 			}
-			m.n->reason = not_reason::finished;
+		}
+		m.n->reason = not_reason::finished;
+		if (m.n->reason != not_reason::finished) {
+			cout << "WFTMATE;ASDASDLKJASD\n";
 		}
 		cur->handle_message(std::move(m.mess));
+		if (m.n->reason != not_reason::finished) {
+			cout << "WFTMATE\n";
+		}
 	}
 	//actual commit and message processing functions
 	inline void _do_message(message &m) {
@@ -182,6 +186,9 @@ private:
 			if (m.n) {
 				m.n->exc_ptr = std::current_exception();
 			}
+		}
+		if (m.n->reason != not_reason::finished) {
+			std::cout << "BAD BUG" << std::endl;
 		}
 		signal_message(m);
 	}
@@ -208,7 +215,8 @@ private:
 		if (!m.n) {
 			return;
 		}
-		m.n->cond.cond.notify_all();
+		std::unique_lock<std::mutex> lck(m.n->cond.mut);
+		m.n->cond.cond.notify_one();
 	};
 
 	void return_message(message *m) {
@@ -222,6 +230,7 @@ private:
 			break;
 		case is_malloc:
 			free(m);
+			break;
 		case is_stack:
 		default:
 			break;
