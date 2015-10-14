@@ -3,6 +3,7 @@
 #include <deque>
 #include <utility>
 #include <mutex>
+#include <thread>
 
 template<bool dolock = false>
 class flat_queue {
@@ -18,6 +19,7 @@ class flat_queue {
 											  std::memory_order_relaxed)) {
 					return;
 				}
+			std::this_thread::sleep_for(std::chrono::nanoseconds(500));
 			}
 		}
 		void release() {

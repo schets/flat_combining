@@ -5,15 +5,15 @@
 #include <mutex>
 #include <random>
 using namespace std;
-flat_queue<false> test;
+flat_queue<true> test;
 
 bool go = false;
 std::mutex mut;
 std::condition_variable cond;
 
 constexpr static size_t nthread = 8;
-constexpr static size_t npush = 100000 / nthread;
-int stopval = npush + 1;
+constexpr static size_t npush = 10000000;
+int stopval = npush + nthread * 10;
 std::thread threads[nthread];
 
 void pusht(unsigned int start) {
@@ -24,19 +24,8 @@ void pusht(unsigned int start) {
 		cond.wait(lck, [&]() {return go; });
 	}
 	cout << "started " << start << endl;
-	for (size_t i = 0; i < 500; i++) {
-		test.as_push(i + start);
-	}
 	for (size_t i = 0; i < npush; i++) {
-		int rval;
-		if (rng() % 3) {
-			test.as_push(i + start);
-		}
-		else {
-			if (!test.as_pop(rval)) {
-				test.as_push(i + start);
-			}
-		}
+		test.as_push(i + start);
 	}
 	cout << "finished " << start << endl;
 }
@@ -48,6 +37,7 @@ void popt() {
 			std::this_thread::sleep_for(std::chrono::microseconds(10));
 		}
 		else if (dummy == stopval) {
+			cout << "Done popping" << endl;
 			return;
 		}
 	}
@@ -67,7 +57,7 @@ int main(int argc, char **argv) {
 	}
 	std::this_thread::sleep_for(std::chrono::milliseconds(5));
 	auto runst = std::thread(popt);
-	auto ctime = clock();
+	auto cclock = std::chrono::steady_clock::now();
 	go = true;
 	cond.notify_all();
 	for (auto &st : threads) {
@@ -75,11 +65,16 @@ int main(int argc, char **argv) {
 	}
 	test.as_push(stopval);
 	runst.join();
-	ctime = clock() - ctime;
-	int i;
-	cout << "done" << endl;
-	cout << "Took " << (ctime * 1.0) / CLOCKS_PER_SEC
+	auto diff = std::chrono::steady_clock::now() - cclock;
+	auto td = chrono::duration_cast<chrono::milliseconds>(diff).count() - 5;
+	double tdiff = ((double)td / 1000.0);
+	auto total_elem = (nthread * npush) * 2; //* 2 since popping them all
+	auto elempt = total_elem / tdiff;
+	auto elemptpt = elempt / nthread;
+	cout << "Took " << tdiff
 		 << " seconds for " << nthread << " threads and "
-		 << npush << " elements per thread" << endl;
+		 << npush << " elements per thread" << endl
+		 << "This amounts to " << elemptpt
+		 << " operations per thread per second" << endl;
 	return 0;
 }
