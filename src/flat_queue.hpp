@@ -1,6 +1,7 @@
 #pragma once
 #include "flat_combining.hpp"
 #include <deque>
+#include <queue>
 #include <utility>
 #include <mutex>
 #include <thread>
@@ -26,7 +27,7 @@ class flat_queue {
 			mut.store(0, std::memory_order_release);
 		}
 	};
-	std::deque<int> value;
+	std::priority_queue<int> value;
 	lwmut mut;
 public:
 	enum class m_type {
@@ -53,16 +54,16 @@ public:
 	void handle_message(message_type m) {
 		switch (m.mess) {
 		case m_type::insert:
-			value.push_back(m.data.add);
+			value.push(m.data.add);
 			break;
 		case m_type::remove:
 			if (value.empty()) {
 				m.data.remove->suc = false;
 			}
 			else {
-				m.data.remove->val = value.front();
+				m.data.remove->val = value.top();
 				m.data.remove->suc = true;
-				value.pop_front();
+				value.pop();
 			}
 		}
 	}
@@ -76,17 +77,18 @@ public:
 		cout << "killing!";
 	}
 
+	static constexpr int numrun = 10;
 	void as_push(int i) {
 		if (dolock) {
 			mut.get();
-			value.push_back(i);
+			value.push(i);
 			mut.release();
 			return;
 		}
 		message_type m;
 		m.data.add = i;
 		m.mess = m_type::insert;
-		combiner.send_operation_async(m);
+		combiner.send_operation_async(m, 10);
 	}
 
 	bool as_pop(int &i) {
@@ -96,8 +98,8 @@ public:
 				mut.release();
 				return false;
 			}
-			i = value.front();
-			value.pop_front();
+			i = value.top();
+			value.pop();
 			mut.release();
 			return true;
 		}
