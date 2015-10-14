@@ -1,10 +1,13 @@
 #ifndef FLAT_COMBINING_HPP_
 #define FLAT_COMBINING_HPP_
 
+#include "utils.hpp"
+
 #include <atomic>
 #include <thread>
 
 #include <iostream>
+#include <algorithm>
 using namespace std;
 
 #include <type_traits>
@@ -112,7 +115,7 @@ protected:
 						uint16_t num_try) {
 		if (op_mut.try_acquire()) {
 			cur->handle_message(std::move(m));
-			if (num_try > -1) {
+			if (num_try < 0) {
 				apply_to_messages<false>(-1);
 			}
 			else {
@@ -131,7 +134,7 @@ public:
 		waiting(0),
 		current(0) {
 			op_mut.release();
-			mtest = (int *)0xffffffff;
+			mtest = (int *)0xffffffffull;
 		}
 
 	void send_operation(mtype m, int16_t num_try = -1) {
@@ -226,7 +229,7 @@ private:
 		return flag & flg;
 	}
 
-	void return_message(message *m) {
+	inline void return_message(message *m) {
 
 		//delegate to the proper message handler
 		//multi-producer, on the stack
@@ -291,32 +294,21 @@ private:
 	template<bool limited>
 	bool apply_to_messages(int16_t l) {
 
-		auto inhere = current.fetch_add(1);
-
-		if (inhere != 0) {
-			cout << "many threads " << inhere;
-		}
-
 		//make work with older gccs
-		auto ctail = qtail.exchange(nullptr, std::memory_order_acquire);
-
-		if (ctail == nullptr) {
-			current.fetch_sub(1);
+		auto qtest = qtail.load(std::memory_order_relaxed);
+		if (qtest == nullptr) {
 			return false;
 		}
+		auto ctail = qtail.exchange(nullptr, std::memory_order_relaxed);
+		FLAT_COMB_CONSUME_FENCE;
 
 		uint16_t cnum = 0;
 		_begin();
 		for (;;) {
 			auto cur_m = ctail;
-			if (test_flag(is_mp, cur_m->flags)) {
-				if (cur_m->fromwhich == nullptr) {
-					cout << "Bad ptr somehow!" << endl;
-				}
-			}
 
-			ctail = ctail->next.load(std::memory_order_acquire);
-
+			ctail = ctail->next.load(std::memory_order_relaxed);
+			FLAT_COMB_CONSUME_FENCE;
 			if (limited) {
 				++cnum;
 			}
@@ -335,7 +327,8 @@ private:
 			if (ctail == nullptr) {
 				if (qtail.load(std::memory_order_relaxed) != nullptr) {
 					//should make work with older gccs
-					ctail = qtail.exchange(nullptr, std::memory_order_acquire);
+					ctail = qtail.exchange(nullptr, std::memory_order_relaxed);
+					FLAT_COMB_CONSUME_FENCE;
 				}
 				else {
 					break;
@@ -344,7 +337,6 @@ private:
 		};
 
 		_commit();
-		current.fetch_sub(1);
 		return true;
 	}
 };

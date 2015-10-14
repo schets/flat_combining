@@ -6,6 +6,8 @@
 #include <vector>
 #include <cstddef>
 
+#include "utils.hpp"
+
 namespace flat_combining {
 namespace _private {
 
@@ -154,12 +156,15 @@ public:
 	void return_message(void *_m) {
 		message *m = (message *)_m;
 		m->next.store(nullptr, std::memory_order_relaxed);
-		auto oldtail = tail.exchange(m, std::memory_order_acq_rel);
+		auto oldtail = tail.exchange(m, std::memory_order_release);
+		FLAT_COMB_CONSUME_FENCE;
 		oldtail->next.store(tail, std::memory_order_release);
 	}
 
 	void *get_message() {
-		auto cnext = head->next.load(std::memory_order_consume);
+		auto cnext = head->next.load(std::memory_order_relaxed);
+		//the dependent load is the next load of next from head
+		FLAT_COMB_CONSUME_FENCE;
 		if (cnext != nullptr) {
 			void *rval = head->data.buff;
 			head = cnext;

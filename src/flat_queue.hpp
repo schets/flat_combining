@@ -51,7 +51,9 @@ public:
 	void handle_message(message_type m) {
 		switch (m.mess) {
 		case m_type::insert:
-			value.push_back(m.data.add);
+			for (size_t i = 0; i < numrun; i++) {
+				value.push_back(m.data.add);
+			}
 			break;
 		case m_type::remove:
 			if (value.empty()) {
@@ -60,7 +62,9 @@ public:
 			else {
 				m.data.remove->val = value.front();
 				m.data.remove->suc = true;
-				value.pop_front();
+				for (size_t i = 0; i < numrun; i++) {
+					value.pop_front();
+				}
 			}
 		}
 	}
@@ -74,6 +78,7 @@ public:
 		cout << "killing!";
 	}
 
+	static constexpr int numrun = 10;
 	void as_push(int i) {
 		if (dolock) {
 			mut.get();
@@ -84,7 +89,7 @@ public:
 		message_type m;
 		m.data.add = i;
 		m.mess = m_type::insert;
-		combiner.send_operation_async(m);
+		combiner.send_operation_async(m, 10);
 	}
 
 	bool as_pop(int &i) {
@@ -103,7 +108,7 @@ public:
 		message_type m;
 		m.data.remove = &rm;
 		m.mess = m_type::remove;
-		combiner.send_operation(m);
+		combiner.send_operation(m, 10);
 		if (rm.suc) {
 			i = rm.val;
 			return true;
